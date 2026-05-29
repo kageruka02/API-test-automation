@@ -1,0 +1,5 @@
+[
+  { "userId": 1, "expectedName": "Leanne Graham", "expectedUsername": "Bret" },
+  { "userId": 2, "expectedName": "Ervin Howell", "expectedUsername": "Antonette" },
+  { "userId": 3, "expectedName": "Clementine Bauch", "expectedUsername": "Samantha" }
+]

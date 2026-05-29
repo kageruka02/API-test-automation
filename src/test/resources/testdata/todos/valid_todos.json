@@ -1,0 +1,5 @@
+[
+  { "todoId": 1, "expectedUserId": 1, "expectedCompleted": false },
+  { "todoId": 2, "expectedUserId": 1, "expectedCompleted": false },
+  { "todoId": 4, "expectedUserId": 1, "expectedCompleted": true }
+]

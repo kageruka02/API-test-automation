@@ -1,0 +1,391 @@
+name: API Test Automation CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      # ── STEP 1: Checkout code ──
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── STEP 2: Install Java 17 ──
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      # ── STEP 3: Run all tests ──
+      - name: Run tests with Maven
+        id: run_tests
+        run: |
+          mvn clean test 2>&1 | tee test-output.txt
+          TEST_EXIT_CODE=${PIPESTATUS[0]}
+
+          TOTAL=$(grep -oP 'Tests run: \K[0-9]+' test-output.txt | tail -1 || echo "0")
+          FAILURES=$(grep -oP 'Failures: \K[0-9]+' test-output.txt | tail -1 || echo "0")
+          ERRORS=$(grep -oP 'Errors: \K[0-9]+' test-output.txt | tail -1 || echo "0")
+          SKIPPED=$(grep -oP 'Skipped: \K[0-9]+' test-output.txt | tail -1 || echo "0")
+          PASSED=$((TOTAL - FAILURES - ERRORS - SKIPPED))
+
+          echo "total=$TOTAL" >> $GITHUB_OUTPUT
+          echo "passed=$PASSED" >> $GITHUB_OUTPUT
+          echo "failures=$FAILURES" >> $GITHUB_OUTPUT
+          echo "errors=$ERRORS" >> $GITHUB_OUTPUT
+          echo "skipped=$SKIPPED" >> $GITHUB_OUTPUT
+          echo "commit_msg=$(git log -1 --pretty=%s)" >> $GITHUB_OUTPUT
+
+          if [ "$FAILURES" -gt 0 ] || [ "$ERRORS" -gt 0 ]; then
+            echo "has_failures=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_failures=false" >> $GITHUB_OUTPUT
+          fi
+        continue-on-error: true
+
+      # ── STEP 4: Parse failure details with Python ──
+      - name: Parse failure details
+        if: always()
+        run: |
+          python3 << 'PYEOF'
+          import xml.etree.ElementTree as ET
+          import glob, html, json
+
+          has_failures = "${{ steps.run_tests.outputs.has_failures }}"
+          slack_lines = []
+          email_items = []
+
+          if has_failures == "true":
+              for xml_file in sorted(glob.glob("target/surefire-reports/TEST-*.xml")):
+                  try:
+                      tree = ET.parse(xml_file)
+                      root = tree.getroot()
+                      for tc in root.iter("testcase"):
+                          failure = tc.find("failure")
+                          error = tc.find("error")
+                          issue = failure if failure is not None else error
+                          if issue is not None:
+                              name = tc.get("name", "Unknown")
+                              classname = tc.get("classname", "Unknown")
+                              short_class = classname.split(".")[-1]
+                              msg = issue.get("message", "No message available")
+                              itype = issue.get("type", "AssertionError").split(".")[-1]
+                              stack = (issue.text or "")[:800]
+                              msg_clean = msg.replace("\n", " ").replace("\r", "").strip()
+
+                              # SLACK format
+                              slack_lines.append(f"• {short_class}.{name}")
+                              slack_lines.append(f"  {itype}: {msg_clean}")
+                              slack_lines.append(f"  Steps: 1) Run test method {name}")
+                              slack_lines.append(f"  2) Send HTTP request to API endpoint")
+                              slack_lines.append(f"  3) Validate response against expected values")
+                              slack_lines.append(f"  4) Assertion failed — {msg_clean}")
+                              slack_lines.append("")
+
+                              # EMAIL format (HTML)
+                              safe_msg = html.escape(msg_clean)
+                              safe_stack = html.escape(stack)
+                              email_items.append(f"""<li style="margin-bottom:20px;">
+                                <strong style="font-size:15px;">{html.escape(short_class)}.{html.escape(name)}</strong><br>
+                                <span style="color:#ef4444;font-style:italic;">Result: {safe_msg}</span><br><br>
+                                <strong>Failure Type:</strong> {html.escape(itype)}<br>
+                                <strong>Severity:</strong> Critical | <strong>Priority:</strong> High | <strong>Status:</strong> Open<br>
+                                <strong>Expected:</strong> See assertion message above<br>
+                                <strong>Actual:</strong> {safe_msg}<br><br>
+                                <strong>Steps to Reproduce:</strong>
+                                <ol>
+                                  <li>Run test method <code>{html.escape(name)}</code></li>
+                                  <li>Send HTTP request to the API endpoint as defined in the test</li>
+                                  <li>Observe the response status code and body returned by the API</li>
+                                  <li>Compare actual response against the expected assertion value</li>
+                                  <li>Assertion failed — see Expected vs Actual above</li>
+                                </ol>
+                                <details><summary><strong>Stack Trace</strong></summary>
+                                <pre style="background:#1e1e1e;color:#f8f8f2;padding:12px;border-radius:6px;font-size:12px;overflow-x:auto;white-space:pre-wrap;">{safe_stack}</pre>
+                                </details>
+                              </li>""")
+                  except Exception as e:
+                      slack_lines.append(f"Error parsing {xml_file}: {e}")
+
+          if not slack_lines:
+              slack_lines = ["All tests passed!"]
+          if not email_items:
+              email_items = ["<li>All tests passed!</li>"]
+
+          with open("/tmp/slack-details.txt", "w") as f:
+              f.write("\n".join(slack_lines))
+
+          with open("/tmp/email-details.html", "w") as f:
+              f.write("<ul>" + "\n".join(email_items) + "</ul>")
+          PYEOF
+
+      # ── STEP 5: Build failed email body ──
+      - name: Build failed email body
+        if: always() && steps.run_tests.outputs.has_failures == 'true'
+        run: |
+          EMAIL_DETAILS=$(cat /tmp/email-details.html 2>/dev/null || echo "<ul><li>See Allure report</li></ul>")
+
+          cat > /tmp/full-email.html << HTMLEOF
+          <div style="font-family: Arial, sans-serif; max-width: 700px; margin: 0 auto;">
+            <h1 style="color: #ef4444; text-align: center;">FAILED ❌</h1>
+            <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+              <tr><td style="border: 1px solid #ddd; padding: 10px; font-weight: bold;">Repository</td>
+                  <td style="border: 1px solid #ddd; padding: 10px;">${{ github.repository }}</td></tr>
+              <tr><td style="border: 1px solid #ddd; padding: 10px; font-weight: bold;">Branch</td>
+                  <td style="border: 1px solid #ddd; padding: 10px;">${{ github.ref_name }}</td></tr>
+              <tr><td style="border: 1px solid #ddd; padding: 10px; font-weight: bold;">Commit</td>
+                  <td style="border: 1px solid #ddd; padding: 10px;">${{ steps.run_tests.outputs.commit_msg }}</td></tr>
+              <tr><td style="border: 1px solid #ddd; padding: 10px; font-weight: bold;">Triggered by</td>
+                  <td style="border: 1px solid #ddd; padding: 10px;">${{ github.actor }}</td></tr>
+            </table>
+            <h2>Test Results</h2>
+            <table style="width: 100%; border-collapse: collapse; margin: 20px 0; text-align: center;">
+              <tr style="background: #f5f5f5;">
+                <th style="border: 1px solid #ddd; padding: 10px;">Total</th>
+                <th style="border: 1px solid #ddd; padding: 10px; color: #22c55e;">Passed</th>
+                <th style="border: 1px solid #ddd; padding: 10px; color: #ef4444;">Failed</th>
+                <th style="border: 1px solid #ddd; padding: 10px;">Errors</th>
+                <th style="border: 1px solid #ddd; padding: 10px; color: #f59e0b;">Skipped</th>
+              </tr>
+              <tr>
+                <td style="border: 1px solid #ddd; padding: 10px;">${{ steps.run_tests.outputs.total }}</td>
+                <td style="border: 1px solid #ddd; padding: 10px;">${{ steps.run_tests.outputs.passed }}</td>
+                <td style="border: 1px solid #ddd; padding: 10px;">${{ steps.run_tests.outputs.failures }}</td>
+                <td style="border: 1px solid #ddd; padding: 10px;">${{ steps.run_tests.outputs.errors }}</td>
+                <td style="border: 1px solid #ddd; padding: 10px;">${{ steps.run_tests.outputs.skipped }}</td>
+              </tr>
+            </table>
+            <h3>🔥 Failed Test Details</h3>
+            ${EMAIL_DETAILS}
+            <h3>⏭️ Skipped/Disabled Tests</h3>
+            <ul><li>No skipped tests</li></ul>
+            <h3>📸 Screenshots</h3>
+            <p>Screenshots are available in the Allure report artifact.</p>
+            <p style="text-align: center; margin-top: 30px;">
+              <a href="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                 style="background: #2563eb; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px;">
+                View Full Report &amp; Download Artifacts</a>
+            </p>
+          </div>
+          HTMLEOF
+
+          echo "FAILED_EMAIL_BODY<<ENVEOF" >> $GITHUB_ENV
+          cat /tmp/full-email.html >> $GITHUB_ENV
+          echo "ENVEOF" >> $GITHUB_ENV
+
+      # ── STEP 6: Generate Allure Report ──
+      - name: Generate Allure Report
+        if: always()
+        run: mvn allure:report -q 2>/dev/null || true
+
+      # ── STEP 7: Upload Allure Report artifact ──
+      - name: Upload Allure Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-report
+          path: target/site/allure-maven-plugin/
+          retention-days: 30
+
+      # ── STEP 8: Upload Surefire Reports artifact ──
+      - name: Upload Surefire Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: target/surefire-reports/
+          retention-days: 30
+
+      # ── STEP 9: Deploy Allure Report to GitHub Pages ──
+      - name: Publish to GitHub Pages
+        if: always()
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: target/site/allure-maven-plugin/
+
+      # ── STEP 10: Slack - Passed ──
+      - name: Slack Notification - Passed
+        if: always() && steps.run_tests.outputs.has_failures == 'false'
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+          --data '{
+            "blocks": [
+              {
+                "type": "header",
+                "text": {"type": "plain_text", "text": "✅ All Tests Passed", "emoji": true}
+              },
+              {
+                "type": "section",
+                "fields": [
+                  {"type": "mrkdwn", "text": "*Repository:*\n${{ github.repository }}"},
+                  {"type": "mrkdwn", "text": "*Branch:*\n${{ github.ref_name }}"},
+                  {"type": "mrkdwn", "text": "*Triggered by:*\n${{ github.actor }}"},
+                  {"type": "mrkdwn", "text": "*Commit:*\n${{ steps.run_tests.outputs.commit_msg }}"}
+                ]
+              },
+              {
+                "type": "section",
+                "fields": [
+                  {"type": "mrkdwn", "text": "*Total:* ${{ steps.run_tests.outputs.total }}"},
+                  {"type": "mrkdwn", "text": "*Passed:* ${{ steps.run_tests.outputs.passed }}"},
+                  {"type": "mrkdwn", "text": "*Failed:* 0"},
+                  {"type": "mrkdwn", "text": "*Skipped:* ${{ steps.run_tests.outputs.skipped }}"}
+                ]
+              },
+              {
+                "type": "actions",
+                "elements": [
+                  {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "View Run Details"},
+                    "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                  }
+                ]
+              }
+            ]
+          }' ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      # ── STEP 11: Slack - Failed ──
+      - name: Slack Notification - Failed
+        if: always() && steps.run_tests.outputs.has_failures == 'true'
+        run: |
+          SLACK_DETAILS=$(python3 -c "
+          import json
+          with open('/tmp/slack-details.txt', 'r') as f:
+              text = f.read().strip()
+          print(json.dumps(text)[1:-1])
+          " 2>/dev/null || echo "See Allure report for details")
+
+          curl -X POST -H 'Content-type: application/json' \
+          --data "{
+            \"blocks\": [
+              {
+                \"type\": \"header\",
+                \"text\": {\"type\": \"plain_text\", \"text\": \"❌ Tests Failed — Bug Report\", \"emoji\": true}
+              },
+              {
+                \"type\": \"section\",
+                \"fields\": [
+                  {\"type\": \"mrkdwn\", \"text\": \"*Repository:*\n${{ github.repository }}\"},
+                  {\"type\": \"mrkdwn\", \"text\": \"*Branch:*\n${{ github.ref_name }}\"},
+                  {\"type\": \"mrkdwn\", \"text\": \"*Triggered by:*\n${{ github.actor }}\"},
+                  {\"type\": \"mrkdwn\", \"text\": \"*Commit:*\n${{ steps.run_tests.outputs.commit_msg }}\"}
+                ]
+              },
+              {
+                \"type\": \"section\",
+                \"fields\": [
+                  {\"type\": \"mrkdwn\", \"text\": \"*Total:* ${{ steps.run_tests.outputs.total }}\"},
+                  {\"type\": \"mrkdwn\", \"text\": \"*Passed:* ${{ steps.run_tests.outputs.passed }}\"},
+                  {\"type\": \"mrkdwn\", \"text\": \"*Failed:* ${{ steps.run_tests.outputs.failures }}\"},
+                  {\"type\": \"mrkdwn\", \"text\": \"*Errors:* ${{ steps.run_tests.outputs.errors }}\"}
+                ]
+              },
+              {
+                \"type\": \"section\",
+                \"text\": {
+                  \"type\": \"mrkdwn\",
+                  \"text\": \"*🔥 Failed Test Details:*\n\`\`\`${SLACK_DETAILS}\`\`\`\"
+                }
+              },
+              {
+                \"type\": \"section\",
+                \"text\": {
+                  \"type\": \"mrkdwn\",
+                  \"text\": \"📸 Download the *Allure Report* artifact from the link below for full request/response logs.\"
+                }
+              },
+              {
+                \"type\": \"actions\",
+                \"elements\": [
+                  {
+                    \"type\": \"button\",
+                    \"text\": {\"type\": \"plain_text\", \"text\": \"View Run Details\"},
+                    \"url\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"
+                  }
+                ]
+              }
+            ]
+          }" ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      # ── STEP 12: Email - Passed ──
+      - name: Email Notification - Passed
+        if: always() && steps.run_tests.outputs.has_failures == 'false'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: "PASSED ✅ - ${{ github.repository }}"
+          to: ${{ secrets.EMAIL_USERNAME }}
+          from: CI Test Bot <${{ secrets.EMAIL_USERNAME }}>
+          html_body: |
+            <div style="font-family: Arial, sans-serif; max-width: 700px; margin: 0 auto;">
+              <h1 style="color: #22c55e; text-align: center;">PASSED ✅</h1>
+              <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+                <tr><td style="border: 1px solid #ddd; padding: 10px; font-weight: bold;">Repository</td>
+                    <td style="border: 1px solid #ddd; padding: 10px;">${{ github.repository }}</td></tr>
+                <tr><td style="border: 1px solid #ddd; padding: 10px; font-weight: bold;">Branch</td>
+                    <td style="border: 1px solid #ddd; padding: 10px;">${{ github.ref_name }}</td></tr>
+                <tr><td style="border: 1px solid #ddd; padding: 10px; font-weight: bold;">Commit</td>
+                    <td style="border: 1px solid #ddd; padding: 10px;">${{ steps.run_tests.outputs.commit_msg }}</td></tr>
+                <tr><td style="border: 1px solid #ddd; padding: 10px; font-weight: bold;">Triggered by</td>
+                    <td style="border: 1px solid #ddd; padding: 10px;">${{ github.actor }}</td></tr>
+              </table>
+              <h2>Test Results</h2>
+              <table style="width: 100%; border-collapse: collapse; margin: 20px 0; text-align: center;">
+                <tr style="background: #f5f5f5;">
+                  <th style="border: 1px solid #ddd; padding: 10px;">Total</th>
+                  <th style="border: 1px solid #ddd; padding: 10px; color: #22c55e;">Passed</th>
+                  <th style="border: 1px solid #ddd; padding: 10px; color: #ef4444;">Failed</th>
+                  <th style="border: 1px solid #ddd; padding: 10px;">Errors</th>
+                  <th style="border: 1px solid #ddd; padding: 10px; color: #f59e0b;">Skipped</th>
+                </tr>
+                <tr>
+                  <td style="border: 1px solid #ddd; padding: 10px;">${{ steps.run_tests.outputs.total }}</td>
+                  <td style="border: 1px solid #ddd; padding: 10px;">${{ steps.run_tests.outputs.passed }}</td>
+                  <td style="border: 1px solid #ddd; padding: 10px;">0</td>
+                  <td style="border: 1px solid #ddd; padding: 10px;">0</td>
+                  <td style="border: 1px solid #ddd; padding: 10px;">${{ steps.run_tests.outputs.skipped }}</td>
+                </tr>
+              </table>
+              <h3>🔥 Failed Test Details</h3>
+              <ul><li>All tests passed!</li></ul>
+              <h3>⏭️ Skipped/Disabled Tests</h3>
+              <ul><li>No skipped tests</li></ul>
+              <h3>📸 Screenshots</h3>
+              <p>Screenshots are available in the Allure report artifact.</p>
+              <p style="text-align: center; margin-top: 30px;">
+                <a href="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                   style="background: #2563eb; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px;">
+                  View Full Report &amp; Download Artifacts</a>
+              </p>
+            </div>
+
+      # ── STEP 13: Email - Failed ──
+      - name: Email Notification - Failed
+        if: always() && steps.run_tests.outputs.has_failures == 'true'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: "FAILED ❌ - ${{ github.repository }}"
+          to: ${{ secrets.EMAIL_USERNAME }}
+          from: CI Test Bot <${{ secrets.EMAIL_USERNAME }}>
+          html_body: ${{ env.FAILED_EMAIL_BODY }}

@@ -1,0 +1,7 @@
+{
+  "postId": 1,
+  "id": 1,
+  "name": "Updated Comment",
+  "email": "updated@example.com",
+  "body": "This comment has been updated."
+}

@@ -1,0 +1,5 @@
+[
+  { "photoId": 1, "expectedAlbumId": 1 },
+  { "photoId": 2, "expectedAlbumId": 1 },
+  { "photoId": 51, "expectedAlbumId": 2 }
+]

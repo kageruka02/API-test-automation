@@ -1,0 +1,5 @@
+[
+  { "albumId": 1, "expectedUserId": 1, "expectedTitleStart": "quidem molestiae enim" },
+  { "albumId": 2, "expectedUserId": 1, "expectedTitleStart": "sunt qui excepturi" },
+  { "albumId": 3, "expectedUserId": 1, "expectedTitleStart": "omnis laborum odio" }
+]

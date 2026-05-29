@@ -1,0 +1,5 @@
+[
+  { "postId": 1, "expectedUserId": 1, "expectedTitleStart": "sunt aut facere" },
+  { "postId": 2, "expectedUserId": 1, "expectedTitleStart": "qui est esse" },
+  { "postId": 3, "expectedUserId": 1, "expectedTitleStart": "ea molestias quasi" }
+]

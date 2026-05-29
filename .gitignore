@@ -1,0 +1,13 @@
+# Maven build output
+target/
+
+# IDE files
+.idea/
+*.iml
+
+# Allure generated results (regenerated every mvn test)
+allure-results/
+allure-report/
+
+# OS files
+.DS_Store

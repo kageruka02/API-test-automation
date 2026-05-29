@@ -1,0 +1,5 @@
+[
+  { "commentId": 1, "expectedPostId": 1 },
+  { "commentId": 2, "expectedPostId": 1 },
+  { "commentId": 6, "expectedPostId": 2 }
+]
