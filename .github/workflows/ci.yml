@@ -261,7 +261,7 @@ jobs:
                     \"type\": \"button\",
                     \"text\": {\"type\": \"plain_text\", \"text\": \"View Run Details\"},
                     \"url\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"
-                  }
+                  },
                 ]
               }
             ]

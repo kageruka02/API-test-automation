@@ -1,6 +1,7 @@
 package com.kageruka.apitest.config;
 
 public class Constants {
+    //constants statuses
     public static final int STATUS_OK = 200;
     public static final int STATUS_CREATED = 201;
     public static final int STATUS_NOT_FOUND = 404;
